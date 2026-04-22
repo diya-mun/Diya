@@ -1,0 +1,402 @@
+import network
+import socket
+import neopixel
+import machine
+from machine import Pin, PWM, TouchPad
+import time
+import gc
+ 
+buzzer      = PWM(Pin(23), freq=1800, duty=0)
+pushbutton  = Pin(32, Pin.IN, Pin.PULL_UP)
+IN1         = Pin(22, Pin.OUT)
+IN2         = Pin(21, Pin.OUT)
+en          = PWM(Pin(15), freq=1000)
+limitswitch = Pin(18, Pin.IN, Pin.PULL_UP)
+ 
+
+MOTOR_RUN_MS  = 10000
+motor_stop_at = 0          
+ 
+def motor_start():
+    global motor_stop_at
+    motor_stop_at = time.ticks_ms() + MOTOR_RUN_MS
+    en.duty(850)
+    IN1.value(1)
+    IN2.value(0)
+ 
+def motor_stop():
+    global motor_stop_at
+    motor_stop_at = 0
+    en.duty(0)
+    IN1.value(0)
+    IN2.value(0)
+ 
+def motor_tick():
+    if motor_stop_at and time.ticks_diff(motor_stop_at, time.ticks_ms()) <= 0:
+        motor_stop()
+ 
+
+PEW_PATTERN = [
+    (1800, 700,  60),
+    (0,    0,   100),
+    (1800, 700,  60),
+    (0,    0,   100),
+    (1800, 700,  60),
+    (0,    0,   100),
+    (1800, 700,  60),
+    (0,    0,   100),
+]
+ 
+buzz_step   = 0
+buzz_due_at = 0
+buzz_active = False
+ 
+def buzzer_start():
+    global buzz_step, buzz_due_at, buzz_active
+    buzz_step   = 0
+    buzz_active = True
+    buzz_due_at = time.ticks_ms()
+ 
+def buzzer_tick():
+    global buzz_step, buzz_due_at, buzz_active
+    if not buzz_active:
+        return
+    if time.ticks_diff(time.ticks_ms(), buzz_due_at) < 0:
+        return
+    if buzz_step >= len(PEW_PATTERN):
+        buzzer.duty(0)
+        buzz_active = False
+        return
+    freq, duty, duration_ms = PEW_PATTERN[buzz_step]
+    if freq:
+        buzzer.freq(freq)
+    buzzer.duty(duty)
+    buzz_due_at = time.ticks_ms() + duration_ms
+    buzz_step  += 1
+ 
+
+limit_last = 1
+ 
+def limitswitch_tick():
+    global limit_last
+    current = limitswitch.value()
+    if limit_last == 1 and current == 0:
+        print("Limit switch hit")
+        buzzer_start()
+    limit_last = current
+ 
+
+NUM_LEDS  = 16          
+PIN_RING1 = 19
+PIN_RING2 = 5
+ 
+np1 = neopixel.NeoPixel(machine.Pin(PIN_RING1), NUM_LEDS)
+np2 = neopixel.NeoPixel(machine.Pin(PIN_RING2), NUM_LEDS)
+ 
+
+state = {"theme": "sher_e_baloch_gold"}
+ 
+THEME_META = {
+    "sher_e_baloch_gold":    {"title": "SHER-E-BALOCH GOLD",     "hex": ["#ffc800","#ffdc32","#c87800","#ffa000","#b46400"]},
+    "sher_e_baloch_crimson": {"title": "SHER-E-BALOCH CRIMSON",  "hex": ["#c8001e","#ff0032","#960014","#ff3250","#640028"]},
+    "jaskirat_steel":        {"title": "JASKIRAT SINGH STEEL",   "hex": ["#1e2a3a","#2e4060","#3a5080","#4a6890","#1a2030"]},
+    "jaskirat_ivory":        {"title": "JASKIRAT SINGH IVORY",   "hex": ["#ffe8c0","#ffd090","#ffb850","#ffe0a0","#ffc060"]},
+    "hamza_green":           {"title": "HAMZA ALI MAZARI GREEN", "hex": ["#006400","#228b22","#2e8b57","#3cb371","#145214"]},
+    "rehman_rust":           {"title": "REHMAN DAKAIT RUST",     "hex": ["#c84800","#e05a00","#a03200","#ff6414","#8c2800"]},
+    "rehman_smoke":          {"title": "REHMAN DAKAIT SMOKE",    "hex": ["#6e6e6e","#8c8c8c","#505050","#aaaaaa","#3c3c3c"]},
+    "lyari_sunset":          {"title": "LYARI SUNSET",           "hex": ["#ff5000","#ff0050","#c80078","#ff9600","#b400c8"]},
+    "naal_nachna_neon":      {"title": "NAAL NACHNA NEON",       "hex": ["#ff00c8","#00ffc8","#ffff00","#00c8ff","#c800ff"]},
+    "dhurandhar_steel":      {"title": "DHURANDHAR STEEL",       "hex": ["#1e3a5f","#4a7fa5","#0a1f3c","#8ab4d0","#2a5080"]},
+}
+ 
+def hex_to_rgb(h, brightness=0.35):
+    h = h.lstrip("#")
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return (int(r * brightness), int(g * brightness), int(b * brightness))
+ 
+def update_rings(theme_name):
+    colours     = THEME_META.get(theme_name, THEME_META["sher_e_baloch_gold"])["hex"]
+    num_colours = len(colours)
+    for i in range(NUM_LEDS):
+        colour_idx = (i * num_colours) // NUM_LEDS
+        rgb = hex_to_rgb(colours[colour_idx])
+        np1[i] = rgb
+        np2[i] = rgb
+    np1.write()
+    np2.write()
+ 
+update_rings(state["theme"])
+ 
+
+def build_cards(active_theme):
+    parts = []
+    for key, meta in THEME_META.items():
+        swatch_html = ""
+        for c in meta["hex"]:
+            swatch_html += '<div class="swatch" style="background:' + c + '"></div>'
+        colour_csv = ",".join(meta["hex"])
+        active_cls = " active" if key == active_theme else ""
+        card = (
+            '<a href="#" class="theme-card' + active_cls + '"'
+            ' data-theme="' + key + '"'
+            ' data-colours="' + colour_csv + '">'
+            + '<div class="card-glow"></div>'
+            + '<div class="swatches">' + swatch_html + '</div>'
+            + '<div class="theme-name">' + meta["title"] + '</div>'
+            + '<div class="card-arrow">&#8599;</div>'
+            + '</a>'
+        )
+        parts.append(card)
+    return "".join(parts)
+ 
+def build_preview(colours):
+    return "".join(
+        '<div class="preview-seg" style="background:' + c + '"></div>'
+        for c in colours
+    )
+ 
+def build_json_colours(colours):
+    return "[" + ",".join('"' + c + '"' for c in colours) + "]"
+ 
+
+def send_all(conn, data):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    mv   = memoryview(data)
+    sent = 0
+    while sent < len(mv):
+        try:
+            n = conn.send(mv[sent:])
+            if n:
+                sent += n
+        except OSError as e:
+            if e.args[0] == 11:      
+                time.sleep_ms(5)
+            else:
+                raise
+ 
+ 
+def stream_page(conn, active_theme):
+    """Stream the page in logical sections — never builds the whole thing at once."""
+    gc.collect()
+ 
+    meta         = THEME_META.get(active_theme, THEME_META["sher_e_baloch_gold"])
+    colours      = meta["hex"]
+    col0         = colours[0]
+    col1         = colours[1]
+    active_title = meta["title"]
+    json_colours = build_json_colours(colours)
+    preview_html = build_preview(colours)
+    cards        = build_cards(active_theme)
+ 
+ 
+    send_all(conn, b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n")
+ 
+   
+    send_all(conn,
+        "<!DOCTYPE html><html lang='en'><head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>PhotoBooth</title>"
+        "<link rel='preconnect' href='https://fonts.googleapis.com'>"
+        "<link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Syne:wght@400;600;800&family=DM+Mono&display=swap' rel='stylesheet'>"
+        "<style>"
+        "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}"
+        ":root{--c0:" + col0 + ";--c1:" + col1 + ";--bg:#080808;--surface:#0f0f0f;"
+        "--border:rgba(255,255,255,0.06);--text:#e8e8e8;--dim:#404040}"
+        "body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden}"
+        "body::before{content:'';position:fixed;inset:0;"
+        "background-image:url(\"data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E\");"
+        "pointer-events:none;z-index:0;opacity:0.55}"
+        "#canvas{position:fixed;inset:0;pointer-events:none;z-index:1;opacity:0.65}"
+        ".content{position:relative;z-index:2;max-width:760px;margin:0 auto;padding:0 20px 80px}"
+        "header{position:relative;z-index:2;text-align:center;padding:64px 24px 48px}"
+        ".logo{font-family:'Bebas Neue',sans-serif;font-size:clamp(3.5rem,10vw,7rem);letter-spacing:0.08em;line-height:1;"
+        "background:linear-gradient(135deg,var(--c0),var(--c1));-webkit-background-clip:text;-webkit-text-fill-color:transparent;"
+        "background-clip:text;filter:drop-shadow(0 0 40px var(--c0));animation:logopulse 3s ease-in-out infinite}"
+        "@keyframes logopulse{0%,100%{filter:drop-shadow(0 0 40px var(--c0))}50%{filter:drop-shadow(0 0 70px var(--c1)) drop-shadow(0 0 120px var(--c0))}}"
+        ".logo-sub{font-family:'DM Mono',monospace;font-size:0.7rem;letter-spacing:0.35em;color:var(--dim);text-transform:uppercase;margin-top:10px}"
+        ".active-badge{display:inline-flex;align-items:center;gap:10px;margin-top:28px;padding:10px 22px;"
+        "background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:999px;"
+        "font-family:'DM Mono',monospace;font-size:0.72rem;letter-spacing:0.1em;text-transform:uppercase;backdrop-filter:blur(8px)}"
+        ".dot{width:8px;height:8px;border-radius:50%;background:var(--c0);box-shadow:0 0 10px var(--c0);animation:pulse 1.6s ease-in-out infinite}"
+        "@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.3;transform:scale(0.7)}}"
+        ".preview-strip{display:flex;height:4px;border-radius:999px;overflow:hidden;margin-bottom:48px;box-shadow:0 0 30px var(--c0)}"
+        ".preview-seg{flex:1}"
+        ".section-label{font-family:'DM Mono',monospace;font-size:0.65rem;letter-spacing:0.3em;color:var(--dim);text-transform:uppercase;margin-bottom:18px;padding-left:2px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}"
+        ".theme-card{position:relative;background:var(--surface);border:1px solid var(--border);border-radius:16px;"
+        "padding:20px 18px 18px;text-decoration:none;color:var(--text);overflow:hidden;"
+        "transition:transform 0.3s cubic-bezier(.22,.68,0,1.2),border-color 0.3s,box-shadow 0.3s;cursor:pointer}"
+        ".theme-card::after{content:'';position:absolute;inset:0;border-radius:16px;opacity:0;"
+        "background:radial-gradient(circle at 50% 0%,rgba(255,255,255,0.04) 0%,transparent 70%);transition:opacity 0.3s}"
+        ".theme-card:hover{transform:translateY(-4px) scale(1.02);border-color:rgba(255,255,255,0.15);box-shadow:0 20px 60px rgba(0,0,0,0.5)}"
+        ".theme-card:hover::after{opacity:1}"
+        ".theme-card.active{border-color:var(--c0) !important;box-shadow:0 0 0 1px var(--c0),0 0 40px rgba(0,0,0,0.3),inset 0 0 30px rgba(255,255,255,0.015)}"
+        ".card-glow{position:absolute;inset:0;border-radius:16px;opacity:0;pointer-events:none;transition:opacity 0.4s}"
+        ".theme-card.active .card-glow{opacity:1;background:radial-gradient(ellipse at 50% -20%,rgba(255,255,255,0.07) 0%,transparent 65%);animation:cardglow 2.5s ease-in-out infinite}"
+        "@keyframes cardglow{0%,100%{opacity:0.5}50%{opacity:1}}"
+        ".swatches{display:flex;gap:5px;margin-bottom:14px}"
+        ".swatch{flex:1;height:24px;border-radius:6px;transition:transform 0.3s}"
+        ".theme-card:hover .swatch{transform:scaleY(1.2)}"
+        ".theme-name{font-family:'Bebas Neue',sans-serif;font-size:1.15rem;letter-spacing:0.06em;line-height:1.2}"
+        ".card-arrow{position:absolute;top:16px;right:16px;font-size:0.85rem;color:var(--dim);opacity:0;"
+        "transform:translate(-4px,4px);transition:opacity 0.25s,transform 0.25s}"
+        ".theme-card:hover .card-arrow{opacity:0.6;transform:translate(0,0)}"
+        ".theme-card.active .card-arrow{opacity:1;color:var(--c0);transform:translate(0,0)}"
+        "footer{position:relative;z-index:2;text-align:center;padding:40px 24px;"
+        "font-family:'DM Mono',monospace;font-size:0.6rem;letter-spacing:0.2em;color:var(--dim)}"
+        ".fade-in{animation:fadeup 0.7s both ease-out}"
+        "@keyframes fadeup{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}"
+        ".content>*:nth-child(1){animation-delay:0.05s}"
+        ".content>*:nth-child(2){animation-delay:0.12s}"
+        ".content>*:nth-child(3){animation-delay:0.2s}"
+        ".content>*:nth-child(4){animation-delay:0.28s}"
+        "</style></head><body>"
+        "<canvas id='canvas'></canvas>"
+    )
+ 
+
+    send_all(conn,
+        "<header class='fade-in'>"
+        "<div class='logo'>PHOTO&nbsp;BOOTH</div>"
+        "<div class='logo-sub'>Dhurandhar Edition</div>"
+        "<div class='active-badge'><div class='dot'></div>"
+        "<span id='active-title'>" + active_title + "</span>"
+        "</div></header>"
+    )
+ 
+
+    send_all(conn,
+        "<div class='content'>"
+        "<div class='preview-strip fade-in' id='preview-strip'>" + preview_html + "</div>"
+        "<div class='section-label fade-in'>&#8212; Choose your theme</div>"
+    )
+ 
+
+    send_all(conn, "<div class='grid fade-in'>" + cards + "</div></div>")
+ 
+    send_all(conn, "<footer>PHOTOBOOTH &nbsp;&#183;&nbsp; DHURANDHAR EDITION</footer>")
+ 
+    send_all(conn,
+        "<script>"
+        "var canvas=document.getElementById('canvas');"
+        "var ctx=canvas.getContext('2d');"
+        "var COLOURS=" + json_colours + ";"
+        "var W,H,particles=[];"
+        "function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight;}"
+        "window.addEventListener('resize',resize);resize();"
+        "function Particle(){this.reset(true);}"
+        "Particle.prototype.reset=function(initial){"
+        "this.x=Math.random()*W;"
+        "this.y=initial?Math.random()*H:H+10;"
+        "this.vy=-(0.2+Math.random()*0.7);"
+        "this.vx=(Math.random()-0.5)*0.25;"
+        "this.r=0.8+Math.random()*2.2;"
+        "this.life=0;this.maxLife=180+Math.random()*300;"
+        "this.col=COLOURS[Math.floor(Math.random()*COLOURS.length)];};"
+        "Particle.prototype.update=function(){"
+        "this.x+=this.vx;this.y+=this.vy;this.life++;"
+        "if(this.life>this.maxLife||this.y<-10)this.reset(false);};"
+        "Particle.prototype.draw=function(){"
+        "var p=this.life/this.maxLife;"
+        "var a=p<0.15?p/0.15:p>0.75?(1-p)/0.25:1;"
+        "ctx.beginPath();ctx.arc(this.x,this.y,this.r,0,Math.PI*2);"
+        "ctx.fillStyle=this.col+Math.floor(a*255).toString(16).padStart(2,'0');ctx.fill();"
+        "if(this.r>1.5){ctx.beginPath();ctx.arc(this.x,this.y,this.r*3,0,Math.PI*2);"
+        "ctx.fillStyle=this.col+Math.floor(a*40).toString(16).padStart(2,'0');ctx.fill();}};"
+        "for(var i=0;i<120;i++)particles.push(new Particle());"
+        "function loop(){ctx.clearRect(0,0,W,H);particles.forEach(function(p){p.update();p.draw();});requestAnimationFrame(loop);}"
+        "loop();"
+        "document.querySelectorAll('.theme-card').forEach(function(card){"
+        "var cols=card.dataset.colours.split(',');"
+        "var theme=card.dataset.theme;"
+        "card.addEventListener('mouseenter',function(){"
+        "card.style.setProperty('--c0',cols[0]);card.style.setProperty('--c1',cols[1]);"
+        "card.style.boxShadow='0 20px 60px rgba(0,0,0,0.5),0 0 30px '+cols[0]+'44';});"
+        "card.addEventListener('mouseleave',function(){"
+        "if(!card.classList.contains('active')){"
+        "card.style.removeProperty('--c0');card.style.removeProperty('--c1');"
+        "card.style.boxShadow='';}});"
+        "card.addEventListener('click',function(e){"
+        "e.preventDefault();"
+        "document.querySelectorAll('.theme-card').forEach(function(c){c.classList.remove('active');});"
+        "card.classList.add('active');"
+        "document.documentElement.style.setProperty('--c0',cols[0]);"
+        "document.documentElement.style.setProperty('--c1',cols[1]);"
+        "var strip=document.getElementById('preview-strip');strip.innerHTML='';"
+        "cols.forEach(function(c){var d=document.createElement('div');d.className='preview-seg';d.style.background=c;strip.appendChild(d);});"
+        "var t=document.getElementById('active-title');"
+        "if(t)t.textContent=card.querySelector('.theme-name').textContent;"
+        "COLOURS=cols;"
+        "fetch('/theme/'+theme).catch(function(){});});"
+        "});"
+        "</script></body></html>"
+    )
+ 
+
+ap = network.WLAN(network.AP_IF)
+ap.active(True)
+ap.config(essid="PhotoBooth", authmode=0)
+print("AP IP:", ap.ifconfig()[0])
+ 
+addr   = socket.getaddrinfo("0.0.0.0", 80)[0][-1]
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(addr)
+server.listen(1)
+server.setblocking(False)
+print("HTTP server ready.")
+ 
+
+while True:
+ 
+    buzzer_tick()
+    motor_tick()
+    limitswitch_tick()
+ 
+    if pushbutton.value() == 0:
+        print(pushbutton.value())
+        if motor_stop_at == 0:
+            print("detected — motor start")
+            motor_start()
+ 
+    conn = None
+    try:
+        conn, addr_client = server.accept()
+        conn.settimeout(2)
+        try:
+            request = conn.recv(2048).decode("utf-8")
+        except:
+            request = ""
+ 
+        is_ajax = False
+        if "GET " in request:
+            path = request.split(" ")[1].split("?")[0]
+            if path.startswith("/theme/"):
+                new_theme = path.split("/")[-1]
+                if new_theme in THEME_META:
+                    state["theme"] = new_theme
+                    update_rings(new_theme)
+                    print("Theme ->", new_theme)
+                conn.send(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                is_ajax = True
+ 
+        if not is_ajax:
+            stream_page(conn, state["theme"])
+ 
+        conn.close()
+ 
+    except OSError:
+        pass
+    except Exception as e:
+        print("HTTP error:", e)
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+ 
+    time.sleep_ms(10)
